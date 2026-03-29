@@ -15,8 +15,8 @@ import datetime
 from pathlib import Path
 from dotenv import load_dotenv
 import html2text
-import google.generativeai as genai
-from composio import Composio
+from google import genai
+from composio_openai import ComposioToolSet, Action
 
 # ── Config ────────────────────────────────────────────────────────────────────
 load_dotenv()
@@ -33,23 +33,24 @@ RECIPIENTS = [
     if r.strip()
 ]
 
-# Set up Gemini
-genai.configure(api_key=GEMINI_KEY)
-model    = genai.GenerativeModel("gemini-2.5-flash")
-composio = Composio(api_key=COMPOSIO_KEY)
+# Set up Gemini (new SDK)
+client = genai.Client(api_key=GEMINI_KEY)
+GEMINI_MODEL = "gemini-2.5-flash-preview-04-17"
+
+# Set up Composio
+toolset = ComposioToolSet(api_key=COMPOSIO_KEY)
 
 TODAY = datetime.date.today().strftime("%B %d, %Y")
 
 # ── html2text config ──────────────────────────────────────────────────────────
 h = html2text.HTML2Text()
-h.ignore_links      = True   # drop URLs entirely — saves tokens
-h.ignore_images     = True   # drop image tags
-h.ignore_emphasis   = False  # keep bold/italic signals — useful for headlines
-h.body_width        = 0      # don't wrap lines — cleaner for LLM parsing
-h.ignore_tables     = False  # keep table structure where present
+h.ignore_links    = True
+h.ignore_images   = True
+h.ignore_emphasis = False
+h.body_width      = 0
+h.ignore_tables   = False
 
-
-# ── Text cleaner (runs after html2text) ───────────────────────────────────────
+# ── Noise patterns to strip after html2text ───────────────────────────────────
 NOISE_PATTERNS = [
     r"unsubscribe.*",
     r"view\s+(this\s+)?email\s+in.*browser.*",
@@ -66,15 +67,12 @@ NOISE_PATTERNS = [
     r"was this email.*forwarded.*",
     r"follow us on.*",
     r"connect with us.*",
-    r"\*\*\*.*\*\*\*",          # decorative dividers
+    r"\*\*\*.*\*\*\*",
 ]
 
 def clean_text(raw_html: str) -> str:
     """Convert HTML email to clean plain text, strip noise, collapse whitespace."""
-    # html2text does the heavy lifting
-    text = h.handle(raw_html)
-
-    # Strip common newsletter noise line by line
+    text  = h.handle(raw_html)
     lines = text.splitlines()
     cleaned = []
     for line in lines:
@@ -85,13 +83,11 @@ def clean_text(raw_html: str) -> str:
         if any(re.search(p, stripped, re.IGNORECASE) for p in NOISE_PATTERNS):
             continue
         cleaned.append(stripped)
-
-    # Collapse 3+ blank lines into one
     text = re.sub(r"\n{3,}", "\n\n", "\n".join(cleaned))
     return text.strip()
 
 
-# ── State: last run time + yesterday's newsletter ─────────────────────────────
+# ── State management ──────────────────────────────────────────────────────────
 def load_state() -> dict:
     if STATE_FILE.exists():
         with open(STATE_FILE) as f:
@@ -110,15 +106,16 @@ def save_state(last_run: str, newsletter_html: str):
 def fetch_newsletters(since: str) -> list:
     print(f"📥 Fetching newsletters since {since}...")
 
-    result = composio.actions.execute(
-        action="OUTLOOK_LIST_MESSAGES",
+    # List messages
+    list_result = toolset.execute_action(
+        action=Action.OUTLOOK_LIST_MESSAGES,
         params={
             "folder_name": "Inbox",
             "filter": f"receivedDateTime ge {since}"
         }
     )
 
-    messages = result.get("data", {}).get("value", [])
+    messages = list_result.get("data", {}).get("value", [])
     print(f"   Found {len(messages)} emails.")
 
     if not messages:
@@ -127,18 +124,19 @@ def fetch_newsletters(since: str) -> list:
 
     full_emails = []
     for msg in messages:
-        msg_id   = msg.get("id")
-        detail   = composio.actions.execute(
-            action="OUTLOOK_GET_MESSAGE",
+        msg_id = msg.get("id")
+
+        detail = toolset.execute_action(
+            action=Action.OUTLOOK_GET_MESSAGE,
             params={"message_id": msg_id}
         )
+
         raw_body = detail.get("data", {}).get("body", {}).get("content", "")
         sender   = msg.get("from", {}).get("emailAddress", {}).get("name", "Unknown")
         subject  = msg.get("subject", "No Subject")
 
         clean_body = clean_text(raw_body)
 
-        # Cap per email — keeps token usage predictable
         full_emails.append({
             "sender":  sender,
             "subject": subject,
@@ -148,7 +146,7 @@ def fetch_newsletters(since: str) -> list:
     return full_emails
 
 
-# ── Step 2: Build consolidated newsletter text ────────────────────────────────
+# ── Step 2: Build consolidated text ──────────────────────────────────────────
 def build_consolidated_text(emails: list) -> str:
     sections = []
     for e in emails:
@@ -312,7 +310,10 @@ YESTERDAYS_NEWSLETTER:
 
 Return only the final consolidated newsletter, fully written, fully polished, and formatted as reader-facing email-safe HTML."""
 
-    response = model.generate_content(prompt)
+    response = client.models.generate_content(
+        model=GEMINI_MODEL,
+        contents=prompt
+    )
     return response.text
 
 
@@ -321,8 +322,8 @@ def send_digest(html_body: str):
     recipient_list = ", ".join(r["emailAddress"]["address"] for r in RECIPIENTS)
     print(f"📤 Sending digest to: {recipient_list}...")
 
-    composio.actions.execute(
-        action="OUTLOOK_SEND_EMAIL",
+    toolset.execute_action(
+        action=Action.OUTLOOK_SEND_EMAIL,
         params={
             "to": RECIPIENTS,
             "subject": f"Your Daily Digest — {TODAY}",
@@ -344,7 +345,6 @@ def main():
     last_run             = state.get("last_run")
     yesterdays_newsletter = state.get("yesterdays_newsletter", "")
 
-    # First run defaults to 25 hours ago (small buffer)
     if last_run:
         since = last_run
         print(f"   Last run: {since}")
