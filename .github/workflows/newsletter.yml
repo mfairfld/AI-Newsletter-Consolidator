@@ -1,0 +1,42 @@
+name: Daily Newsletter Digest
+
+on:
+  schedule:
+    # Runs at 11:00 AM UTC = 7:00 AM Eastern Time
+    # Change the hour to suit your timezone:
+    #   6 AM ET  = cron '0 10 * * *'
+    #   7 AM ET  = cron '0 11 * * *'
+    #   8 AM ET  = cron '0 12 * * *'
+    - cron: '0 11 * * *'
+
+  # This button lets you run it manually from GitHub anytime
+  workflow_dispatch:
+
+jobs:
+  run-newsletter-bot:
+    runs-on: ubuntu-latest
+
+    steps:
+      # 1. Check out your repo so the runner can see your files
+      - name: Check out repository
+        uses: actions/checkout@v4
+
+      # 2. Set up Python
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      # 3. Install the libraries the script needs
+      - name: Install dependencies
+        run: pip install -r requirements.txt
+
+      # 4. Run the newsletter bot
+      #    Secrets are injected here — never hardcoded in the file
+      - name: Run newsletter bot
+        env:
+          GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
+          COMPOSIO_API_KEY: ${{ secrets.COMPOSIO_API_KEY }}
+          NEWSLETTER_RECIPIENT: ${{ secrets.NEWSLETTER_RECIPIENT }}
+          NEWSLETTER_FOLDER: Newsletters
+        run: python newsletter_bot.py
