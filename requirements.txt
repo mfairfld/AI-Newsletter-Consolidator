@@ -1,4 +1,4 @@
-google-generativeai
+google-genai
 composio-core
 python-dotenv
 html2text
