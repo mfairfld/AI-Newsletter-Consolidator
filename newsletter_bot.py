@@ -16,29 +16,26 @@ from pathlib import Path
 from dotenv import load_dotenv
 import html2text
 from google import genai
-from composio_openai import ComposioToolSet, Action
+from composio import Composio
 
 # ── Config ────────────────────────────────────────────────────────────────────
 load_dotenv()
 
 GEMINI_KEY   = os.getenv("GEMINI_API_KEY")
 COMPOSIO_KEY = os.getenv("COMPOSIO_API_KEY")
+USER_ID      = os.getenv("COMPOSIO_USER_ID")
 STATE_FILE   = Path("bot_state.json")
 
 # Parse recipients — comma-separated emails in secret
 raw_recipients = os.getenv("NEWSLETTER_RECIPIENTS", "")
-RECIPIENTS = [
-    {"emailAddress": {"address": r.strip()}}
-    for r in raw_recipients.split(",")
-    if r.strip()
-]
+RECIPIENTS = [r.strip() for r in raw_recipients.split(",") if r.strip()]
 
-# Set up Gemini (new SDK)
+# Set up Gemini
 client = genai.Client(api_key=GEMINI_KEY)
 GEMINI_MODEL = "gemini-2.5-flash-preview-04-17"
 
 # Set up Composio
-toolset = ComposioToolSet(api_key=COMPOSIO_KEY)
+composio = Composio(api_key=COMPOSIO_KEY)
 
 TODAY = datetime.date.today().strftime("%B %d, %Y")
 
@@ -50,7 +47,7 @@ h.ignore_emphasis = False
 h.body_width      = 0
 h.ignore_tables   = False
 
-# ── Noise patterns to strip after html2text ───────────────────────────────────
+# ── Noise patterns ────────────────────────────────────────────────────────────
 NOISE_PATTERNS = [
     r"unsubscribe.*",
     r"view\s+(this\s+)?email\s+in.*browser.*",
@@ -71,7 +68,6 @@ NOISE_PATTERNS = [
 ]
 
 def clean_text(raw_html: str) -> str:
-    """Convert HTML email to clean plain text, strip noise, collapse whitespace."""
     text  = h.handle(raw_html)
     lines = text.splitlines()
     cleaned = []
@@ -106,10 +102,10 @@ def save_state(last_run: str, newsletter_html: str):
 def fetch_newsletters(since: str) -> list:
     print(f"📥 Fetching newsletters since {since}...")
 
-    # List messages
-    list_result = toolset.execute_action(
-        action=Action.OUTLOOK_LIST_MESSAGES,
-        params={
+    list_result = composio.tools.execute(
+        "OUTLOOK_LIST_MESSAGES",
+        user_id=USER_ID,
+        arguments={
             "folder_name": "Inbox",
             "filter": f"receivedDateTime ge {since}"
         }
@@ -126,15 +122,15 @@ def fetch_newsletters(since: str) -> list:
     for msg in messages:
         msg_id = msg.get("id")
 
-        detail = toolset.execute_action(
-            action=Action.OUTLOOK_GET_MESSAGE,
-            params={"message_id": msg_id}
+        detail = composio.tools.execute(
+            "OUTLOOK_GET_MESSAGE",
+            user_id=USER_ID,
+            arguments={"message_id": msg_id}
         )
 
         raw_body = detail.get("data", {}).get("body", {}).get("content", "")
         sender   = msg.get("from", {}).get("emailAddress", {}).get("name", "Unknown")
         subject  = msg.get("subject", "No Subject")
-
         clean_body = clean_text(raw_body)
 
         full_emails.append({
@@ -148,12 +144,10 @@ def fetch_newsletters(since: str) -> list:
 
 # ── Step 2: Build consolidated text ──────────────────────────────────────────
 def build_consolidated_text(emails: list) -> str:
-    sections = []
-    for e in emails:
-        sections.append(
-            f"--- SOURCE: {e['sender']} | SUBJECT: {e['subject']} ---\n{e['body']}"
-        )
-    return "\n\n".join(sections)
+    return "\n\n".join(
+        f"--- SOURCE: {e['sender']} | SUBJECT: {e['subject']} ---\n{e['body']}"
+        for e in emails
+    )
 
 
 # ── Step 3: Summarize with Gemini ─────────────────────────────────────────────
@@ -193,8 +187,6 @@ Your writing style should reflect **Axios / Smart Brevity** principles:
 
 ## Core Objective
 
-Read the inputs, identify the actual stories, merge overlapping coverage, prioritize what matters, suppress repetition, and produce **one finished consolidated daily newsletter**.
-
 Act as an **editor**, not a transcription engine.
 
 1. Ignore noise and non-editorial junk.
@@ -213,12 +205,12 @@ Prioritize:
 * markets, rates, inflation, credit, currencies, commodities, macro shifts
 * M&A, capital markets, restructuring, financing, activist situations, major transactions
 * corporate strategy, earnings with strategic implications, large partnerships, spin-offs, divestitures
-* policy, regulation, antitrust, trade, taxation, industrial policy, sanctions, legal developments with real business or market impact
-* geopolitics only when materially consequential for markets, sectors, capital flows, supply chains, defense, energy, or multinational strategy
+* policy, regulation, antitrust, trade, taxation, industrial policy, sanctions, legal developments
+* geopolitics only when materially consequential for markets, sectors, or capital flows
 * finance careers, recruiting, compensation, industry structure
-* AI developments with direct financial, investment, or strategic significance
-* real estate transactions, REIT activity, housing data, commercial real estate trends, rate sensitivity
-* industrials — defense contracts, infrastructure spending, manufacturing shifts, logistics, energy
+* AI developments with direct financial or strategic significance
+* real estate transactions, REIT activity, housing data, commercial real estate trends
+* industrials — defense contracts, infrastructure spending, manufacturing shifts, energy
 
 Deprioritize or exclude:
 * light product launches with no strategic significance
@@ -232,9 +224,8 @@ Deprioritize or exclude:
 
 ## Deduplication Rules
 
-Within today's inputs: treat different wording of the same event as one story. Merge into the clearest version.
-
-Against yesterday's newsletter: do not repeat a story unless there is a material update, new confirmed development, or the significance has meaningfully changed.
+Within today's inputs: treat different wording of the same event as one story.
+Against yesterday's newsletter: do not repeat unless there is a material update.
 
 ---
 
@@ -252,49 +243,28 @@ Use these sections when relevant:
 * **Geopolitics / Major Global Stories**
 * **Other Worth Knowing**
 
-Optional (add only if clearly useful):
-* **Finance Careers / Industry**
-* **Credit / Restructuring**
-* **Earnings That Matter**
-* **Capital Markets**
-* **What Changed Since Yesterday**
-
+Optional: Finance Careers / Industry, Credit / Restructuring, Earnings That Matter, Capital Markets, What Changed Since Yesterday.
 Omit any section with nothing worth including.
 
 ---
 
 ## Required Story Item Format
 
-For each story use exactly this HTML:
-
 <p><strong>Source:</strong> ...<br>
 <strong>Author:</strong> ...<br>
 <strong>Headline:</strong> ...</p>
 <ul>
-  <li>...</li>
+  <li>2-5 sentences: what happened, why it matters, what changed. Include specifics where available.</li>
 </ul>
-
-Explanation bullet: 2-5 sentences. Cover what happened, why it matters, what changed. Include specifics — deal size, parties, terms, market reaction, sector impact — when available. Do not write long paragraphs.
 
 ---
 
 ## Style Constraints
 
-* Simple clean HTML only
-* Only these tags: `<h2>`, `<p>`, `<strong>`, `<br>`, `<ul>`, `<li>`
-* No markdown, no code fences, no CSS
-* No `<html>`, `<body>`, or wrapper tags
-* No long introductions or process explanation
-* No mention of filtering, deduplication, or AI
+* Simple clean HTML only: `<h2>`, `<p>`, `<strong>`, `<br>`, `<ul>`, `<li>`
+* No markdown, no code fences, no CSS, no wrapper tags
+* No introductions, process notes, or AI mentions
 * Output must be immediately usable as email body content
-
----
-
-## Fact Rules
-
-* Do not hallucinate facts, sources, authors, numbers, or details
-* If a detail is unclear, omit it or phrase more generally
-* Stay grounded in the provided inputs
 
 ---
 
@@ -308,7 +278,7 @@ YESTERDAYS_NEWSLETTER:
 
 ---
 
-Return only the final consolidated newsletter, fully written, fully polished, and formatted as reader-facing email-safe HTML."""
+Return only the final consolidated newsletter as reader-facing email-safe HTML."""
 
     response = client.models.generate_content(
         model=GEMINI_MODEL,
@@ -319,13 +289,15 @@ Return only the final consolidated newsletter, fully written, fully polished, an
 
 # ── Step 4: Send digest ───────────────────────────────────────────────────────
 def send_digest(html_body: str):
-    recipient_list = ", ".join(r["emailAddress"]["address"] for r in RECIPIENTS)
-    print(f"📤 Sending digest to: {recipient_list}...")
+    print(f"📤 Sending digest to: {', '.join(RECIPIENTS)}...")
 
-    toolset.execute_action(
-        action=Action.OUTLOOK_SEND_EMAIL,
-        params={
-            "to": RECIPIENTS,
+    to_list = [{"emailAddress": {"address": r}} for r in RECIPIENTS]
+
+    composio.tools.execute(
+        "OUTLOOK_SEND_EMAIL",
+        user_id=USER_ID,
+        arguments={
+            "to": to_list,
             "subject": f"Your Daily Digest — {TODAY}",
             "body": {"contentType": "HTML", "content": html_body}
         }
@@ -341,8 +313,12 @@ def main():
         print("❌ No recipients set. Add NEWSLETTER_RECIPIENTS to GitHub Secrets.")
         return
 
-    state                = load_state()
-    last_run             = state.get("last_run")
+    if not USER_ID:
+        print("❌ No Composio user ID set. Add COMPOSIO_USER_ID to GitHub Secrets.")
+        return
+
+    state                 = load_state()
+    last_run              = state.get("last_run")
     yesterdays_newsletter = state.get("yesterdays_newsletter", "")
 
     if last_run:
