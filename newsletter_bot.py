@@ -108,7 +108,8 @@ def fetch_newsletters(since: str) -> list:
         arguments={
             "folder_name": "Inbox",
             "filter": f"receivedDateTime ge {since}"
-        }
+        },
+        dangerously_skip_version_check=True
     )
 
     messages = list_result.get("data", {}).get("value", [])
@@ -125,7 +126,8 @@ def fetch_newsletters(since: str) -> list:
         detail = composio.tools.execute(
             "OUTLOOK_GET_MESSAGE",
             user_id=USER_ID,
-            arguments={"message_id": msg_id}
+            arguments={"message_id": msg_id},
+            dangerously_skip_version_check=True
         )
 
         raw_body = detail.get("data", {}).get("body", {}).get("content", "")
@@ -300,7 +302,8 @@ def send_digest(html_body: str):
             "to": to_list,
             "subject": f"Your Daily Digest — {TODAY}",
             "body": {"contentType": "HTML", "content": html_body}
-        }
+        },
+        dangerously_skip_version_check=True
     )
     print("   ✅ Sent!")
 
@@ -314,7 +317,7 @@ def main():
         return
 
     if not USER_ID:
-        print("❌ No Composio user ID set. Add COMPOSIO_USER_ID to GitHub Secrets.")
+        print("❌ No Composio user ID. Add COMPOSIO_USER_ID to GitHub Secrets.")
         return
 
     state                 = load_state()
