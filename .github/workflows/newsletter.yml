@@ -36,7 +36,6 @@ jobs:
         run: pip install -r requirements.txt
 
       # 4. Restore bot state from previous run
-      #    (last run timestamp + yesterday's newsletter for deduplication)
       - name: Restore bot state
         uses: actions/cache@v4
         with:
@@ -49,6 +48,7 @@ jobs:
         env:
           GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
           COMPOSIO_API_KEY: ${{ secrets.COMPOSIO_API_KEY }}
+          COMPOSIO_USER_ID: ${{ secrets.COMPOSIO_USER_ID }}
           NEWSLETTER_RECIPIENTS: ${{ secrets.NEWSLETTER_RECIPIENTS }}
         run: python newsletter_bot.py
 
