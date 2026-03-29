@@ -1,31 +1,33 @@
 """
 Daily Newsletter Digest Bot
-Reads newsletters from Outlook via Composio,
-summarizes in Axios style using Gemini,
-removes duplicates from yesterday, and sends the digest.
-Supports multiple recipients via comma-separated NEWSLETTER_RECIPIENT secret.
+- Reads newsletters from mason.fairfield.news@outlook.com via Composio
+- Uses html2text for clean, token-efficient email parsing
+- Summarizes using a finance-focused Smart Brevity prompt via Gemini
+- Deduplicates against yesterday's full newsletter
+- Tracks last-run timestamp so no emails are missed or double-counted
+- Sends to all recipients listed in NEWSLETTER_RECIPIENTS secret
 """
 
 import os
+import re
 import json
 import datetime
 from pathlib import Path
 from dotenv import load_dotenv
+import html2text
 import google.generativeai as genai
 from composio import Composio
 
 # ── Config ────────────────────────────────────────────────────────────────────
 load_dotenv()
 
-GEMINI_KEY      = os.getenv("GEMINI_API_KEY")
-COMPOSIO_KEY    = os.getenv("COMPOSIO_API_KEY")
-FOLDER_NAME     = os.getenv("NEWSLETTER_FOLDER", "Newsletters")
-CACHE_FILE      = Path("yesterday_stories.json")
+GEMINI_KEY   = os.getenv("GEMINI_API_KEY")
+COMPOSIO_KEY = os.getenv("COMPOSIO_API_KEY")
+STATE_FILE   = Path("bot_state.json")
 
-# Parse recipients — supports one or many comma-separated emails
-# e.g. "you@email.com" or "you@email.com, friend@email.com, other@email.com"
-raw_recipients  = os.getenv("NEWSLETTER_RECIPIENTS", "")
-RECIPIENTS      = [
+# Parse recipients — comma-separated emails in secret
+raw_recipients = os.getenv("NEWSLETTER_RECIPIENTS", "")
+RECIPIENTS = [
     {"emailAddress": {"address": r.strip()}}
     for r in raw_recipients.split(",")
     if r.strip()
@@ -33,149 +35,301 @@ RECIPIENTS      = [
 
 # Set up Gemini
 genai.configure(api_key=GEMINI_KEY)
-model     = genai.GenerativeModel("gemini-2.5-flash")
-composio  = Composio(api_key=COMPOSIO_KEY)
+model    = genai.GenerativeModel("gemini-2.5-flash")
+composio = Composio(api_key=COMPOSIO_KEY)
 
-TODAY     = datetime.date.today().strftime("%B %d, %Y")
+TODAY = datetime.date.today().strftime("%B %d, %Y")
+
+# ── html2text config ──────────────────────────────────────────────────────────
+h = html2text.HTML2Text()
+h.ignore_links      = True   # drop URLs entirely — saves tokens
+h.ignore_images     = True   # drop image tags
+h.ignore_emphasis   = False  # keep bold/italic signals — useful for headlines
+h.body_width        = 0      # don't wrap lines — cleaner for LLM parsing
+h.ignore_tables     = False  # keep table structure where present
 
 
-# ── Step 1: Fetch today's newsletters from Outlook ────────────────────────────
-def fetch_newsletters():
-    print("📥 Fetching newsletters from Outlook...")
+# ── Text cleaner (runs after html2text) ───────────────────────────────────────
+NOISE_PATTERNS = [
+    r"unsubscribe.*",
+    r"view\s+(this\s+)?email\s+in.*browser.*",
+    r"if you.*no longer.*wish.*",
+    r"manage.*preferences.*",
+    r"you.*receiving.*because.*",
+    r"©\s*\d{4}.*",
+    r"all rights reserved.*",
+    r"privacy policy.*",
+    r"terms of (service|use).*",
+    r"click here to.*",
+    r"forward this email.*",
+    r"add .* to your address book.*",
+    r"was this email.*forwarded.*",
+    r"follow us on.*",
+    r"connect with us.*",
+    r"\*\*\*.*\*\*\*",          # decorative dividers
+]
+
+def clean_text(raw_html: str) -> str:
+    """Convert HTML email to clean plain text, strip noise, collapse whitespace."""
+    # html2text does the heavy lifting
+    text = h.handle(raw_html)
+
+    # Strip common newsletter noise line by line
+    lines = text.splitlines()
+    cleaned = []
+    for line in lines:
+        stripped = line.strip()
+        if not stripped:
+            cleaned.append("")
+            continue
+        if any(re.search(p, stripped, re.IGNORECASE) for p in NOISE_PATTERNS):
+            continue
+        cleaned.append(stripped)
+
+    # Collapse 3+ blank lines into one
+    text = re.sub(r"\n{3,}", "\n\n", "\n".join(cleaned))
+    return text.strip()
+
+
+# ── State: last run time + yesterday's newsletter ─────────────────────────────
+def load_state() -> dict:
+    if STATE_FILE.exists():
+        with open(STATE_FILE) as f:
+            return json.load(f)
+    return {"last_run": None, "yesterdays_newsletter": ""}
+
+def save_state(last_run: str, newsletter_html: str):
+    with open(STATE_FILE, "w") as f:
+        json.dump({
+            "last_run": last_run,
+            "yesterdays_newsletter": newsletter_html
+        }, f, indent=2)
+
+
+# ── Step 1: Fetch emails since last run ───────────────────────────────────────
+def fetch_newsletters(since: str) -> list:
+    print(f"📥 Fetching newsletters since {since}...")
 
     result = composio.actions.execute(
         action="OUTLOOK_LIST_MESSAGES",
         params={
-            "folder_name": FOLDER_NAME,
-            "filter": "receivedDateTime ge " + (
-                datetime.datetime.utcnow() - datetime.timedelta(hours=24)
-            ).strftime("%Y-%m-%dT%H:%M:%SZ")
+            "folder_name": "Inbox",
+            "filter": f"receivedDateTime ge {since}"
         }
     )
 
     messages = result.get("data", {}).get("value", [])
-    print(f"   Found {len(messages)} newsletters.")
+    print(f"   Found {len(messages)} emails.")
 
     if not messages:
-        print("   No newsletters found today. Exiting.")
+        print("   No new newsletters. Exiting.")
         return []
 
     full_emails = []
     for msg in messages:
-        msg_id = msg.get("id")
-        detail = composio.actions.execute(
+        msg_id   = msg.get("id")
+        detail   = composio.actions.execute(
             action="OUTLOOK_GET_MESSAGE",
             params={"message_id": msg_id}
         )
-        body    = detail.get("data", {}).get("body", {}).get("content", "")
-        sender  = msg.get("from", {}).get("emailAddress", {}).get("name", "Unknown")
-        subject = msg.get("subject", "No Subject")
+        raw_body = detail.get("data", {}).get("body", {}).get("content", "")
+        sender   = msg.get("from", {}).get("emailAddress", {}).get("name", "Unknown")
+        subject  = msg.get("subject", "No Subject")
+
+        clean_body = clean_text(raw_body)
+
+        # Cap per email — keeps token usage predictable
         full_emails.append({
             "sender":  sender,
             "subject": subject,
-            "body":    body[:8000]
+            "body":    clean_body[:5000]
         })
 
     return full_emails
 
 
-# ── Step 2: Load yesterday's headlines for deduplication ─────────────────────
-def load_yesterday_stories():
-    if CACHE_FILE.exists():
-        with open(CACHE_FILE) as f:
-            return json.load(f)
-    return []
+# ── Step 2: Build consolidated newsletter text ────────────────────────────────
+def build_consolidated_text(emails: list) -> str:
+    sections = []
+    for e in emails:
+        sections.append(
+            f"--- SOURCE: {e['sender']} | SUBJECT: {e['subject']} ---\n{e['body']}"
+        )
+    return "\n\n".join(sections)
 
 
-# ── Step 3: Summarize with Gemini in Axios style ──────────────────────────────
-def summarize_newsletters(emails, yesterday_headlines):
+# ── Step 3: Summarize with Gemini ─────────────────────────────────────────────
+def summarize(newsletters_text: str, yesterdays_newsletter: str) -> str:
     print("🤖 Summarizing with Gemini...")
 
-    email_content = "\n\n---\n\n".join([
-        f"FROM: {e['sender']}\nSUBJECT: {e['subject']}\n\n{e['body']}"
-        for e in emails
-    ])
+    prompt = f"""# Consolidated Daily Newsletter Agent Prompt
 
-    yesterday_block = (
-        "YESTERDAY'S HEADLINES (remove duplicates of these):\n" +
-        "\n".join(f"- {h}" for h in yesterday_headlines)
-    ) if yesterday_headlines else "No previous digest — skip deduplication."
+## Role
 
-    prompt = f"""You are a newsletter editor. Today is {TODAY}.
+You are an elite financial news editor and newsletter strategist creating a **finished, reader-facing daily newsletter** for a single user. Your job is to transform **aggregated raw newsletter text** into one **clean, concise, highly useful, well-organized daily briefing**.
 
-Your job:
-1. Read the newsletter emails below.
-2. Extract the most important stories.
-3. Remove any stories that duplicate yesterday's headlines.
-4. Format the final digest in Axios "Smart Brevity" style.
+You are writing for a reader who cares most about:
 
-AXIOS STYLE RULES:
-- Open each story with a bold one-sentence hook.
-- Use labels like "Why it matters:", "The big picture:", "Between the lines:", "What to watch:".
-- Keep each story to 3-5 bullet points max.
-- Simple, clear language. No jargon.
-- Group stories by topic if there are many.
-- End with a "1 fun thing" section if anything light came up.
-- Format as clean HTML for email using <h2>, <p>, <ul>, <li>, <b> tags.
-- Add a header: "Your Daily Digest — {TODAY}"
+* markets and macro
+* investment banking
+* M&A and transactions
+* corporate development and corporate strategy
+* business developments with strategic or financial significance
+* major policy or geopolitical developments only when they materially matter
+* finance careers and adjacent developments when relevant
+* AI developments with financial, strategic, or market significance
+* real estate — commercial, residential, REIT, macro housing trends, notable transactions
+* industrials — manufacturing, infrastructure, defense, energy, logistics, supply chain
 
-{yesterday_block}
+Your writing style should reflect **Axios / Smart Brevity** principles:
 
----
-
-TODAY'S NEWSLETTERS:
-{email_content}
+* concise but not shallow
+* highly scannable
+* reader-first
+* practical and informative
+* crisp, clean, and polished
+* focused on **why it matters**
+* no fluff, no filler, no generic transitions
 
 ---
 
-Return ONLY the HTML email body. No commentary, no markdown fences."""
+## Core Objective
 
-    response    = model.generate_content(prompt)
-    digest_html = response.text
+Read the inputs, identify the actual stories, merge overlapping coverage, prioritize what matters, suppress repetition, and produce **one finished consolidated daily newsletter**.
 
-    headlines_prompt = f"""From the digest below, extract a JSON list of headline strings.
-Return ONLY a JSON array. No other text, no markdown fences.
-Example: ["Headline one", "Headline two"]
+Act as an **editor**, not a transcription engine.
 
-Digest:
-{digest_html}"""
+1. Ignore noise and non-editorial junk.
+2. Extract the real stories, developments, and themes.
+3. Merge duplicate or overlapping coverage into single story items.
+4. Rank items by relevance, novelty, and practical usefulness.
+5. Organize into logical sections.
+6. Write polished, reader-facing copy in Smart Brevity style.
+7. Avoid repeating yesterday's stories unless there is a real update.
 
-    headlines_response = model.generate_content(headlines_prompt)
+---
 
-    try:
-        today_headlines = json.loads(headlines_response.text.strip())
-    except Exception:
-        today_headlines = []
+## Editorial Prioritization
 
-    return digest_html, today_headlines
+Prioritize:
+* markets, rates, inflation, credit, currencies, commodities, macro shifts
+* M&A, capital markets, restructuring, financing, activist situations, major transactions
+* corporate strategy, earnings with strategic implications, large partnerships, spin-offs, divestitures
+* policy, regulation, antitrust, trade, taxation, industrial policy, sanctions, legal developments with real business or market impact
+* geopolitics only when materially consequential for markets, sectors, capital flows, supply chains, defense, energy, or multinational strategy
+* finance careers, recruiting, compensation, industry structure
+* AI developments with direct financial, investment, or strategic significance
+* real estate transactions, REIT activity, housing data, commercial real estate trends, rate sensitivity
+* industrials — defense contracts, infrastructure spending, manufacturing shifts, logistics, energy
+
+Deprioritize or exclude:
+* light product launches with no strategic significance
+* routine consumer brand news
+* minor executive commentary with no meaningful change
+* low-signal political drama without policy or strategic relevance
+* repetitive versions of the same story
+* pure marketing emails with no editorial content
+
+---
+
+## Deduplication Rules
+
+Within today's inputs: treat different wording of the same event as one story. Merge into the clearest version.
+
+Against yesterday's newsletter: do not repeat a story unless there is a material update, new confirmed development, or the significance has meaningfully changed.
+
+---
+
+## Section Structure
+
+Use these sections when relevant:
+
+* **Market Update**
+* **IB / M&A / Transactions**
+* **Companies / Strategy**
+* **AI Developments**
+* **Real Estate**
+* **Industrials**
+* **Politics / Policy**
+* **Geopolitics / Major Global Stories**
+* **Other Worth Knowing**
+
+Optional (add only if clearly useful):
+* **Finance Careers / Industry**
+* **Credit / Restructuring**
+* **Earnings That Matter**
+* **Capital Markets**
+* **What Changed Since Yesterday**
+
+Omit any section with nothing worth including.
+
+---
+
+## Required Story Item Format
+
+For each story use exactly this HTML:
+
+<p><strong>Source:</strong> ...<br>
+<strong>Author:</strong> ...<br>
+<strong>Headline:</strong> ...</p>
+<ul>
+  <li>...</li>
+</ul>
+
+Explanation bullet: 2-5 sentences. Cover what happened, why it matters, what changed. Include specifics — deal size, parties, terms, market reaction, sector impact — when available. Do not write long paragraphs.
+
+---
+
+## Style Constraints
+
+* Simple clean HTML only
+* Only these tags: `<h2>`, `<p>`, `<strong>`, `<br>`, `<ul>`, `<li>`
+* No markdown, no code fences, no CSS
+* No `<html>`, `<body>`, or wrapper tags
+* No long introductions or process explanation
+* No mention of filtering, deduplication, or AI
+* Output must be immediately usable as email body content
+
+---
+
+## Fact Rules
+
+* Do not hallucinate facts, sources, authors, numbers, or details
+* If a detail is unclear, omit it or phrase more generally
+* Stay grounded in the provided inputs
+
+---
+
+## Inputs
+
+NEWSLETTERS_CONSOLIDATED:
+{newsletters_text}
+
+YESTERDAYS_NEWSLETTER:
+{yesterdays_newsletter if yesterdays_newsletter else "No previous newsletter available."}
+
+---
+
+Return only the final consolidated newsletter, fully written, fully polished, and formatted as reader-facing email-safe HTML."""
+
+    response = model.generate_content(prompt)
+    return response.text
 
 
-# ── Step 4: Send the digest via Outlook to all recipients ─────────────────────
-def send_digest(html_body):
-    recipient_list = ", ".join(
-        r["emailAddress"]["address"] for r in RECIPIENTS
-    )
+# ── Step 4: Send digest ───────────────────────────────────────────────────────
+def send_digest(html_body: str):
+    recipient_list = ", ".join(r["emailAddress"]["address"] for r in RECIPIENTS)
     print(f"📤 Sending digest to: {recipient_list}...")
 
     composio.actions.execute(
         action="OUTLOOK_SEND_EMAIL",
         params={
-            "to": RECIPIENTS,       # full list — everyone gets the same email
+            "to": RECIPIENTS,
             "subject": f"Your Daily Digest — {TODAY}",
-            "body": {
-                "contentType": "HTML",
-                "content": html_body
-            }
+            "body": {"contentType": "HTML", "content": html_body}
         }
     )
     print("   ✅ Sent!")
-
-
-# ── Step 5: Save today's headlines for tomorrow ───────────────────────────────
-def save_headlines(headlines):
-    with open(CACHE_FILE, "w") as f:
-        json.dump(headlines, f, indent=2)
-    print(f"   💾 Saved {len(headlines)} headlines for tomorrow's deduplication.")
 
 
 # ── Main ──────────────────────────────────────────────────────────────────────
@@ -183,20 +337,36 @@ def main():
     print(f"\n🗞️  Newsletter Bot starting — {TODAY}\n")
 
     if not RECIPIENTS:
-        print("❌ No recipients configured. Set NEWSLETTER_RECIPIENTS in your secrets.")
+        print("❌ No recipients set. Add NEWSLETTER_RECIPIENTS to GitHub Secrets.")
         return
 
-    emails = fetch_newsletters()
+    state                = load_state()
+    last_run             = state.get("last_run")
+    yesterdays_newsletter = state.get("yesterdays_newsletter", "")
+
+    # First run defaults to 25 hours ago (small buffer)
+    if last_run:
+        since = last_run
+        print(f"   Last run: {since}")
+    else:
+        since = (datetime.datetime.utcnow() - datetime.timedelta(hours=25)).strftime("%Y-%m-%dT%H:%M:%SZ")
+        print("   First run — fetching last 25 hours.")
+
+    this_run = datetime.datetime.utcnow().strftime("%Y-%m-%dT%H:%M:%SZ")
+
+    emails = fetch_newsletters(since)
     if not emails:
         return
 
-    yesterday_headlines = load_yesterday_stories()
-    print(f"   Loaded {len(yesterday_headlines)} headlines from yesterday.")
+    newsletters_text = build_consolidated_text(emails)
+    print(f"   Consolidated {len(emails)} emails → {len(newsletters_text):,} characters.")
 
-    digest_html, today_headlines = summarize_newsletters(emails, yesterday_headlines)
+    digest_html = summarize(newsletters_text, yesterdays_newsletter)
 
     send_digest(digest_html)
-    save_headlines(today_headlines)
+
+    save_state(this_run, digest_html)
+    print("   💾 State saved for tomorrow.")
 
     print("\n✅ Done! Check your inbox.\n")
 
