@@ -293,15 +293,11 @@ Return only the final consolidated newsletter as reader-facing email-safe HTML."
 def send_digest(html_body: str):
     print(f"📤 Sending digest to: {', '.join(RECIPIENTS)}...")
 
-    to_list = [{"emailAddress": {"address": r}} for r in RECIPIENTS]
-
-    composio.tools.execute(
-        "OUTLOOK_SEND_EMAIL",
-        user_id=USER_ID,
-        arguments={
-            "to": to_list,
-            "subject": f"Your Daily Digest — {TODAY}",
-            "body": {"contentType": "HTML", "content": html_body}
+ composio.tools.execute(
+    "OUTLOOK_SEND_EMAIL",
+    user_id=USER_ID,
+    arguments={
+        "to": ", ".join(RECIPIENTS),
         },
         dangerously_skip_version_check=True
     )
