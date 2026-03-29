@@ -1,4 +1,4 @@
 google-genai
-composio-core
+composio
 python-dotenv
 html2text
