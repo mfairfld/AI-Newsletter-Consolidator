@@ -32,7 +32,7 @@ RECIPIENTS = [r.strip() for r in raw_recipients.split(",") if r.strip()]
 
 # Set up Gemini
 client = genai.Client(api_key=GEMINI_KEY)
-GEMINI_MODEL = "gemini-2.5-flash-preview-04-17"
+GEMINI_MODEL = "gemini-2.0-flash"
 
 # Set up Composio
 composio = Composio(api_key=COMPOSIO_KEY)
