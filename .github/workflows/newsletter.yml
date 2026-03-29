@@ -3,21 +3,25 @@ name: Daily Newsletter Digest
 on:
   schedule:
     # Runs at 11:00 AM UTC = 7:00 AM Eastern Time
-    # Change the hour to suit your timezone:
+    # Adjust to your timezone:
     #   6 AM ET  = cron '0 10 * * *'
     #   7 AM ET  = cron '0 11 * * *'
     #   8 AM ET  = cron '0 12 * * *'
+    #  10 AM ET  = cron '0 14 * * *'
     - cron: '0 11 * * *'
 
-  # This button lets you run it manually from GitHub anytime
+  # Lets you run it manually from GitHub anytime
   workflow_dispatch:
+
+env:
+  FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true
 
 jobs:
   run-newsletter-bot:
     runs-on: ubuntu-latest
 
     steps:
-      # 1. Check out your repo so the runner can see your files
+      # 1. Check out your repo
       - name: Check out repository
         uses: actions/checkout@v4
 
@@ -27,16 +31,30 @@ jobs:
         with:
           python-version: '3.11'
 
-      # 3. Install the libraries the script needs
+      # 3. Install dependencies
       - name: Install dependencies
         run: pip install -r requirements.txt
 
-      # 4. Run the newsletter bot
-      #    Secrets are injected here — never hardcoded in the file
+      # 4. Restore bot state from previous run
+      #    (last run timestamp + yesterday's newsletter for deduplication)
+      - name: Restore bot state
+        uses: actions/cache@v4
+        with:
+          path: bot_state.json
+          key: newsletter-bot-state
+          restore-keys: newsletter-bot-state
+
+      # 5. Run the newsletter bot
       - name: Run newsletter bot
         env:
           GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
           COMPOSIO_API_KEY: ${{ secrets.COMPOSIO_API_KEY }}
-          NEWSLETTER_RECIPIENT: ${{ secrets.NEWSLETTER_RECIPIENT }}
-          NEWSLETTER_FOLDER: Newsletters
+          NEWSLETTER_RECIPIENTS: ${{ secrets.NEWSLETTER_RECIPIENTS }}
         run: python newsletter_bot.py
+
+      # 6. Save updated state for tomorrow's run
+      - name: Save bot state
+        uses: actions/cache@v4
+        with:
+          path: bot_state.json
+          key: newsletter-bot-state
