@@ -299,7 +299,8 @@ def send_digest(html_body: str):
         arguments={
             "to": ", ".join(RECIPIENTS),
             "subject": f"Your Daily Digest — {TODAY}",
-            "body": {"contentType": "HTML", "content": html_body}
+            "body": html_body,
+            "is_html": True
         },
         dangerously_skip_version_check=True
     )
