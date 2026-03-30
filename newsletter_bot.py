@@ -272,10 +272,11 @@ Each story item must use exactly this structure:
 
 ## Style Constraints
 
-* Simple clean HTML only: `<h2>`, `<p>`, `<strong>`, `<br>`, `<ul>`, `<li>`
+* Simple clean HTML only: `<h2>`, `<p>`, `<strong>`, `<br>`, `<ul>`, `<li>`, `<hr>`
 * No markdown, no code fences, no CSS, no wrapper tags (`<html>`, `<body>`, etc.)
 * No introductions, preamble, process notes, or AI mentions
 * Output must be immediately usable as email body HTML
+* Add a `<hr>` after each section
 
 ---
 
