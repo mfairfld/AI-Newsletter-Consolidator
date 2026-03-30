@@ -5,7 +5,7 @@ Daily Newsletter Digest Bot
 - Summarizes using a finance-focused Smart Brevity prompt via Gemini
 - Deduplicates against yesterday's full newsletter
 - Tracks last-run timestamp so no emails are missed or double-counted
-- Sends to all recipients listed in NEWSLETTER_RECIPIENTS secret
+- Sends to primary recipient (NEWSLETTER_TO), BCCs all in NEWSLETTER_RECIPIENTS secret
 """
 
 import os
@@ -26,7 +26,10 @@ COMPOSIO_KEY = os.getenv("COMPOSIO_API_KEY")
 USER_ID      = os.getenv("COMPOSIO_USER_ID")
 STATE_FILE   = Path("bot_state.json")
 
-# Parse recipients — comma-separated emails in secret
+# Primary "To" address — single email shown in the To field
+TO_ADDRESS = os.getenv("NEWSLETTER_TO", "")
+
+# BCC recipients — comma-separated emails, hidden from each other
 raw_recipients = os.getenv("NEWSLETTER_RECIPIENTS", "")
 RECIPIENTS = [r.strip() for r in raw_recipients.split(",") if r.strip()]
 
@@ -297,13 +300,14 @@ Return only the final consolidated newsletter as reader-facing email-safe HTML. 
 
 # ── Step 4: Send digest ───────────────────────────────────────────────────────
 def send_digest(html_body: str):
-    print(f"📤 Sending digest to: {', '.join(RECIPIENTS)}...")
+    print(f"📤 Sending digest to: {TO_ADDRESS}, BCC: {', '.join(RECIPIENTS)}...")
 
     composio.tools.execute(
         "OUTLOOK_SEND_EMAIL",
         user_id=USER_ID,
         arguments={
-            "to": ", ".join(RECIPIENTS),
+            "to": TO_ADDRESS,
+            "bcc": ", ".join(RECIPIENTS),
             "subject": f"Your Daily Digest — {TODAY}",
             "body": html_body,
             "is_html": True
@@ -317,8 +321,8 @@ def send_digest(html_body: str):
 def main():
     print(f"\n🗞️  Newsletter Bot starting — {TODAY}\n")
 
-    if not RECIPIENTS:
-        print("❌ No recipients set. Add NEWSLETTER_RECIPIENTS to GitHub Secrets.")
+    if not TO_ADDRESS:
+        print("❌ No primary recipient set. Add NEWSLETTER_TO to GitHub Secrets.")
         return
 
     if not USER_ID:
