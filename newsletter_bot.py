@@ -307,7 +307,7 @@ def send_digest(html_body: str):
         user_id=USER_ID,
         arguments={
             "to": TO_ADDRESS,
-            "bcc": ", ".join(RECIPIENTS),
+            "bcc": RECIPIENTS,
             "subject": f"Your Daily Digest — {TODAY}",
             "body": html_body,
             "is_html": True
