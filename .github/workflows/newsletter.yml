@@ -8,7 +8,7 @@ on:
     #   7 AM ET  = cron '0 11 * * *'
     #   8 AM ET  = cron '0 12 * * *'
     #  10 AM ET  = cron '0 14 * * *'
-    - cron: '0 11 * * *'
+    - cron: '0 9 * * *'
 
   # Lets you run it manually from GitHub anytime
   workflow_dispatch:
