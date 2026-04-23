@@ -23,11 +23,11 @@ jobs:
     steps:
       # 1. Check out your repo
       - name: Check out repository
-        uses: actions/checkout@v4
+        uses: actions/checkout@v4.2.2
 
       # 2. Set up Python
       - name: Set up Python
-        uses: actions/setup-python@v5
+        uses: actions/setup-python@v5.4.0
         with:
           python-version: '3.11'
 
@@ -37,7 +37,7 @@ jobs:
 
       # 4. Restore bot state from previous run
       - name: Restore bot state
-        uses: actions/cache@v4
+        uses: actions/cache@v4.2.2
         with:
           path: bot_state.json
           key: newsletter-bot-state
@@ -55,7 +55,7 @@ jobs:
 
       # 6. Save updated state for tomorrow's run
       - name: Save bot state
-        uses: actions/cache@v4
+        uses: actions/cache@v4.2.2
         with:
           path: bot_state.json
           key: newsletter-bot-state
