@@ -318,6 +318,20 @@ def send_digest(html_body: str):
     print("   ✅ Sent!")
 
 
+def summarize_with_retry(newsletters_text: str, yesterdays_newsletter: str) -> str:
+    import time
+    for attempt in range(5):
+        try:
+            return summarize(newsletters_text, yesterdays_newsletter)
+        except Exception as e:
+            if "503" in str(e) or "UNAVAILABLE" in str(e):
+                wait = 60 * (attempt + 1)
+                print(f"   ⚠️  Gemini unavailable — waiting {wait}s before retry {attempt + 1}/5...")
+                time.sleep(wait)
+            else:
+                raise
+    raise RuntimeError("❌ Gemini unavailable after 5 retries — giving up.")
+
 # ── Main ──────────────────────────────────────────────────────────────────────
 def main():
     print(f"\n🗞️  Newsletter Bot starting — {TODAY}\n")
@@ -350,7 +364,7 @@ def main():
     newsletters_text = build_consolidated_text(emails)
     print(f"   Consolidated {len(emails)} emails → {len(newsletters_text):,} characters.")
 
-    digest_html = summarize(newsletters_text, yesterdays_newsletter)
+    digest_html = summarize_with_retry(newsletters_text, yesterdays_newsletter)
 
     send_digest(digest_html)
 
